@@ -1,0 +1,436 @@
+---
+title: "Demo"
+output:
+  html_document:
+    code_folding: hide
+    always_allow_html: yes
+    fig_captions: yes
+    highlight: haddock
+    number_sections: yes
+    theme: flatly
+    toc: yes
+    toc_float:
+      collapsed: no
+      smooth_scroll: yes
+      toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+
+
+```{r}
+library(tidyverse)
+library(sjPlot)
+library(textclean)
+library(RCurl)
+```
+
+
+#Cleaning data
+
+Import data
+```{r}
+food.ngo.raw <- getURL("https://raw.githubusercontent.com/saaralonbarkat/stakeholders.emails/master/food_ngo.csv") %>% 
+  read_csv() 
+
+food.ngo.raw %>% names()
+
+#select variables
+food.ngo <- food.ngo.raw %>% 
+  select(organization.name = 5,
+         organization.url = 7,
+         person.head.name = 19,
+         person.head.desc = 20,
+         person.eu.name = 21,
+         person.eu.desc = 22)
+
+glimpse(food.ngo)
+```
+
+Cleaning URLs
+```{r}
+#removing unneccesary parts of urls for scraping
+t1 <- str_split(food.ngo$organization.url,"http://|https://", simplify = TRUE) %>% 
+  data.frame() %>% 
+  select(X2) 
+
+t2<- t1$X2 %>% 
+  str_split("/", simplify = TRUE) %>% 
+  data.frame() %>% 
+  select(organization.url.short = X1)
+
+food.ngo <- food.ngo %>% 
+  mutate(organization.url.short = t2$organization.url.short) %>% 
+  mutate(organization.url.short.clean = organization.url.short %>% str_to_lower() %>% str_replace_all("\\W|@|http:|https:",""))
+
+rm(t1,t2)
+
+#Extracting domains of URLs
+t1 <- str_split(food.ngo$organization.url.short,"www.", simplify = TRUE) %>% 
+  data.frame() %>% 
+  mutate(organization.url.domain.t = str_c(X2,X3)) 
+
+t2 <- str_split(t1$organization.url.domain.t,"\\.", simplify = TRUE) %>% 
+  data.frame() %>% 
+  select(organization.url.domain = X1)
+
+food.ngo <- food.ngo %>% 
+  mutate(organization.url.domain = t2$organization.url.domain) %>% 
+  mutate(organization.url.domain.clean = organization.url.domain %>% str_to_lower() %>% str_replace_all("\\W|@|http:|https:",""))
+
+rm(t1,t2)
+```
+
+
+"Tidy" data - seperate row for each person
+```{r}
+food.ngo.tidy <- food.ngo %>% 
+  gather(key=person.type,
+             value=person.name,
+                c("person.head.name","person.eu.name")) %>% 
+  mutate(person.type = recode(person.type,
+                                    person.head.name="head",
+                                    person.eu.name = "eu person")) %>% 
+  mutate(job.descr = if_else(person.type=="head",
+                            person.head.desc,
+                            person.eu.desc)) 
+
+#Findings unique names (same person both head & EU person)
+t1 <- food.ngo.tidy %>% 
+   group_by(person.name,
+           organization.name) %>% 
+  summarise(person.type.str = str_c(person.type, collapse = " & "))
+
+
+food.ngo.tidy <- food.ngo.tidy %>%
+  distinct(person.name, organization.name,
+           .keep_all = T) %>% 
+  left_join(t1) %>% 
+  mutate(person.type = person.type.str) 
+
+rm(t1)
+```
+
+splitting persons' first and last names:
+```{r}
+#Cleaning persons names before splitting
+food.ngo.tidy <- food.ngo.tidy %>%
+  mutate(person.name.1 = str_replace_all(person.name,"Dr. |Dr.|Prof. |Prof.|\\,","")) %>%
+    mutate(person.name.1 = 
+             str_replace_all(person.name.1,"  "," ")) %>%
+  mutate(person.first.name = word(person.name.1,1),
+         person.last.name.t = word(person.name.1,-1))
+
+#dealing with cases of two first names (e.g. Alon-Barkat) 
+t1 <- str_split(food.ngo.tidy$person.last.name.t,"-", simplify = TRUE) %>% 
+  data.frame() %>% 
+  mutate(person.last.name.v1 = X1 %>% as.character(),
+         person.last.name.v2 = X2 %>% as.character()) %>%
+  select(-X1,
+         -X2) %>% 
+  mutate(person.last.name.v2 = na_if(person.last.name.v2,""))
+
+food.ngo.tidy <- food.ngo.tidy %>% 
+  mutate(person.last.name.v1 = t1$person.last.name.v1,
+         person.last.name.v2 = t1$person.last.name.v2) %>% 
+
+#cleaning first and last names
+    mutate(person.first.name.clean = person.first.name %>% replace_non_ascii() %>% str_to_lower() %>% str_replace_all("\\W",""),
+         person.last.name.v1.clean = person.last.name.v1 %>% replace_non_ascii() %>% str_to_lower() %>% str_replace_all("\\W",""),
+         person.last.name.v2.clean = person.last.name.v2 %>% replace_non_ascii() %>% str_to_lower() %>% str_replace_all("\\W",""))
+
+
+rm(t1)
+
+
+food.ngo.tidy %>%
+  distinct(person.name,.keep_all=T) %>%
+  group_by(person.first.name) %>% 
+  summarise(freq=n()) %>% 
+  arrange(desc(freq)) 
+
+food.ngo.tidy %>%
+  distinct(person.name,.keep_all=T) %>%
+  group_by(person.last.name.v1) %>% 
+  summarise(freq=n()) %>% 
+  arrange(desc(freq)) 
+
+food.ngo.tidy %>%
+  distinct(person.name,.keep_all=T) %>%
+  group_by(person.last.name.v2) %>% 
+  summarise(freq=n()) %>% 
+  arrange(desc(freq))
+
+```
+
+
+Creating acronyms of participant names:
+```{r}
+t1 <- str_split(food.ngo.tidy$person.name.1," |-", simplify = TRUE) %>% 
+  data.frame() %>% 
+mutate_all(funs(str_sub(.,1,1) %>%  str_to_lower())) %>% 
+  mutate(person.name.acronym.v1 = str_c(X1,X2,X3,X4,X5)) %>% 
+  mutate(person.name.acronym.v2 = str_c(str_sub(person.name.acronym.v1,1,1),
+                                          str_sub(person.name.acronym.v1,-1,-1)))
+
+
+food.ngo.tidy <- food.ngo.tidy %>% 
+  mutate(person.name.acronym.v1 = t1$person.name.acronym.v1 %>% replace_non_ascii() %>% str_replace_all("\\W",""),
+         person.name.acronym.v2 = t1$person.name.acronym.v2 %>% replace_non_ascii() %>% str_replace_all("\\W",""))
+
+rm(t1)
+
+food.ngo.tidy %>%
+  group_by(person.name.acronym.v1,
+           person.name.acronym.v2) %>% 
+  summarise(freq=n()) %>% 
+  arrange(desc(freq))
+
+food.ngo.tidy %>% names()
+```
+
+
+#Scraping emails
+
+Creating a list of URLs that need to be scraped 
+```{r}
+url.list <- food.ngo.tidy %>% 
+  distinct(organization.url.short) %>% 
+  mutate(organization.url.short.1 = str_c("'","http://",organization.url.short,"',")) 
+```
+
+Next - copy this list of emails to the python code and scrape them. Save of the CSV files in a specific directory. 
+
+
+After you have the CSV files, we will combine them to one file that contains all the email addresses:
+```{r}
+files <- list.files(path = "C:/SAAR/UNIVERSITY/R/eufood/sample building/data/email_scrape_files/")
+f <- list()
+for (i in 1:length(files)) {
+  f[[i]] <- read_csv(str_c("C:/SAAR/UNIVERSITY/R/eufood/sample building/data/email_scrape_files/",files[i]))%>% 
+  mutate(url.escraper=files[i])}
+
+emails <- bind_rows(f)%>%
+  data.frame() %>%  
+  select(email.escraper=X1,
+         url.email.escraper=X0,
+         url.escraper) 
+```
+
+
+cleaning and filtering out some of the email addresses
+```{r}
+emails <- emails %>% 
+filter(str_detect(email.escraper,"DSC_")==FALSE,
+         str_detect(email.escraper,"png$|jpg$|pdf$|jpeg$")==FALSE) %>%
+  mutate(url.escraper=str_replace_all(url.escraper,"_email_addresses.csv","")) %>% 
+  mutate(email.escraper = email.escraper %>% str_to_lower(),
+    url.escraper.clean = url.escraper %>% str_to_lower() %>% str_replace_all("\\W|@|http:|https:","")) %>% 
+
+#removing points at the end of emails + "20" at the begining
+  mutate(email.escraper = str_replace(email.escraper,"^20|\\.$","")) %>% 
+
+#removing all emails not starting with a letter
+    filter(str_detect(email.escraper,"^[a-z]"))
+
+#splitting the local part and the domain part of emails (before and after the @) 
+t1=str_split(emails$email.escraper,"@", simplify = TRUE) %>% 
+  data.frame() %>% 
+  select(local.part=X1,
+         domain=X2)
+
+t2 <- str_split(t1$domain,"\\.", simplify = TRUE) %>% 
+  data.frame() %>% 
+  select(domain=X1,
+         rest=X2)
+
+emails <- emails %>% 
+  mutate(email.escraper.local.part = t1$local.part %>% str_to_lower(),
+         email.escraper.domain = t2$domain %>% str_to_lower()) %>% 
+  distinct(url.escraper,email.escraper,.keep_all=T) %>% 
+  mutate(email.escraper.domain.clean = email.escraper.domain %>% str_replace_all("\\W|@","")) 
+
+rm(files,t1,t2)
+
+#Extracting url domains
+
+t1=str_split(emails$url.escraper,"http://|https://", simplify = TRUE) %>% 
+  data.frame() 
+
+emails <- emails %>%
+mutate(url.escraper.domain = t1$.) %>% 
+mutate(url.escraper.domain.clean = url.escraper.domain %>% str_to_lower() %>% str_replace_all("\\W|@|http:|https:|www","")) 
+
+rm(t1)
+```
+
+defining "general" email addreses
+```{r}
+emails <- emails%>% 
+  mutate(email.general = str_detect(email.escraper.local.part,"info|contact|office|admin|amministrazione|comunication|comunicacion|marketing|international|mail|secretar|segreter|sekretar|presiden|brussels|biuro|post|media|press|media|enquiries|hello|welcome|webmaster|staff|kontakt|enquiries|membership") %>% as.numeric())
+
+```
+
+
+#Matching emails
+
+Matching with persons names
+```{r}
+t1 <- food.ngo.tidy %>%  
+  left_join(emails,by=c("organization.url.short.clean"="url.escraper.clean")) 
+
+t2 <- t1 %>% 
+  rowwise() %>% 
+  mutate(email.domain.match = str_detect(organization.url.short.clean,email.escraper.domain.clean), 
+         email.last.name.v1 = str_detect(email.escraper.local.part,person.last.name.v1.clean),
+         email.last.name.v2 = str_detect(email.escraper.local.part,person.last.name.v2.clean),
+         email.first.name = str_detect(email.escraper.local.part,person.first.name.clean)) %>%
+  mutate(email.name.acronym.v1 = str_detect(email.escraper.local.part,person.name.acronym.v1),
+         email.name.acronym.v2 = str_detect(email.escraper.local.part,person.name.acronym.v2)) %>%
+  mutate(email.name.acronym = ifelse(nchar(email.escraper.local.part)<=4 &
+    (email.name.acronym.v1==T|email.name.acronym.v1==T),1,0)) %>% 
+  mutate(email.name.match = ifelse(email.general==0 &
+                          str_detect(email.escraper.local.part,email.escraper.domain)==F &
+                                     (email.last.name.v1==T|
+                                     email.last.name.v2==T|
+                                     email.first.name==T|
+                                     email.name.acronym==1),1,0)) %>%
+  
+  distinct(person.name,
+           organization.name,
+           email.escraper,.keep_all = T) %>% 
+  
+  filter(email.name.match==1) %>%
+  
+  arrange(person.name,
+         person.type,
+         desc(email.last.name.v1),
+         desc(email.last.name.v2),
+         desc(email.first.name),
+         desc(email.domain.match)) %>% 
+  
+  group_by(person.name) %>% 
+  summarise(email.person.str = str_c(email.escraper, collapse = "; "))
+  
+
+food.ngo.tidy.emails <- food.ngo.tidy %>% 
+  left_join(t2) %>%  
+
+  select(person.name,
+         person.type,
+         job.descr,
+         organization.name,
+         organization.url,
+         email.person.str) %>% 
+    arrange(organization.name)
+
+rm(t2)
+
+food.ngo.tidy.emails %>% 
+  select(organization.name,person.name,email.person.str) %>% 
+  drop_na()
+```
+
+
+Finding general email addresses: 
+```{r}
+t2 <- t1 %>% 
+  rowwise() %>%
+  mutate(email.domain.match.t1 = str_detect(organization.url.domain.clean,email.escraper.domain.clean) %>% as.numeric(),
+         email.domain.match.t2 = str_detect(email.escraper.domain.clean, organization.url.domain.clean) %>% as.numeric()) %>% 
+  mutate(email.domain.match = ifelse(email.domain.match.t1==1|email.domain.match.t2==1,1,0)) %>% 
+  mutate(email.general.t = str_detect(email.escraper.local.part,email.escraper.domain)%>% as.numeric()) %>% 
+  mutate(email.general = ifelse(email.general==1|email.general.t==1,1,0)) %>%
+  select(-email.general.t) %>%
+  mutate(email.general.domain.match = ifelse(email.general==1 & email.domain.match==1,1,0)) %>% 
+  distinct(organization.name,email.escraper,.keep_all = T) %>% 
+  arrange(organization.name,
+          person.type,
+          desc(email.domain.match),
+          desc(email.general.domain.match))
+
+t2.1 <- t2 %>%
+  filter(email.general.domain.match==1) %>% 
+  group_by(organization.name) %>% 
+  summarise(email.general.str = str_c(email.escraper, collapse = "; "))
+
+t2.2 <- t2 %>%
+  filter(email.domain.match==1,email.general==0) %>% 
+  group_by(organization.name) %>% 
+  summarise(emails.domain.str = str_c(email.escraper, collapse = "; "))
+
+t2.3 <- t2 %>%
+  filter(email.domain.match==0) %>% 
+  group_by(organization.name) %>% 
+  summarise(emails.nondomain.str = str_c(email.escraper, collapse = "; "))
+
+t2.4 <- t2 %>%
+  drop_na(email.escraper) %>% 
+  group_by(organization.name) %>% 
+  summarise(n.emails = n())
+  
+
+food.ngo.tidy.emails <- food.ngo.tidy.emails %>% 
+  left_join(t2.1)  %>%
+  left_join(t2.2)  %>%
+  left_join(t2.3) %>% 
+  left_join(t2.4) %>% 
+  mutate(n.emails = replace_na(n.emails,0))
+
+
+#number of distinct organizations: 
+food.ngo.tidy.emails$organization.name %>% n_distinct()
+
+#general emails found:
+food.ngo.tidy.emails %>% 
+  select(organization.name,email.general.str) %>%
+  distinct(organization.name,.keep_all = T) %>% 
+  drop_na()
+```
+
+#summarizing outcomes
+```{r}
+food.ngo.tidy.emails <- food.ngo.tidy.emails %>% 
+  mutate(person.email.found = ifelse(email.person.str %in% NA,0,1),
+         general.email.found = ifelse(email.general.str %in% NA,0,1),
+         domain.email.found = ifelse(emails.domain.str %in% NA &
+                                       email.general.str %in% NA,0,1),
+         nondomain.email.found = ifelse(emails.domain.str %in% NA &
+                                       email.general.str %in% NA & 
+                                         emails.nondomain.str %in% NA,0,1))
+
+food.ngo.tidy.emails$person.email.found %>% 
+sjp.frq()
+
+food.ngo.tidy.emails %>% 
+  distinct(organization.name,.keep_all = T) %>% 
+  .$general.email.found %>% 
+sjp.frq()
+
+food.ngo.tidy.emails %>% 
+  distinct(organization.name,.keep_all = T) %>% 
+  .$domain.email.found %>% 
+sjp.frq()
+
+food.ngo.tidy.emails %>% 
+  distinct(organization.name,.keep_all = T) %>% 
+  .$nondomain.email.found %>% 
+sjp.frq()
+
+
+emails %>% filter(str_detect(url.escraper,"piaget")==T)
+```
+
+
+
+Export the data to csv file
+```{r}
+food.ngo.tidy.emails %>% 
+  write_csv("food_ngo_emails.csv")
+```
+
+
+
